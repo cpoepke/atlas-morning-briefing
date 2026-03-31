@@ -113,7 +113,7 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
 
     # --- Output format ---
     output_format = config.get("output_format")
-    if output_format and output_format not in ("kindle", "a4", "letter"):
+    if output_format and output_format not in ("kindle", "a4", "letter", "html"):
         errors.append(f"'output_format' must be 'kindle', 'a4', or 'letter', got '{output_format}'")
 
     # --- LLM config ---

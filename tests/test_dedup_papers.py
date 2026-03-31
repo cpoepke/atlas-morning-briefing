@@ -19,7 +19,7 @@ def runner():
         "output_format": "kindle",
         "file_naming": "Atlas-Briefing-{yyyy}.{mm}.{dd}",
         "pdf": {"font_size": 10, "line_spacing": 1.5},
-        "bedrock": {"enabled": False},
+        "llm": {"enabled": False},
     }
     return BriefingRunner(config=config, dry_run=True)
 

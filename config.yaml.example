@@ -145,23 +145,40 @@ pdf:
   include_toc: true
   include_emoji: false
 
-# Amazon Bedrock configuration
+# LLM configuration
+# Primary: MiniMax 2.7 via Anthropic-compatible API
+# Fallback: OpenRouter free models (used only if primary fails)
 # Set enabled: false to run in deterministic mode (no LLM, zero cost)
-bedrock:
+# Env vars: MINIMAX_API_KEY (primary), OPENROUTER_API_KEY (fallback)
+llm:
   enabled: true
-  region: "us-east-1"
   temperature: 0.3
   max_tokens: 2048
-  # Use cross-region inference profile IDs (us.*) for broad region support.
-  # On-demand IDs (e.g. amazon.nova-lite-v1:0) may not work in all regions.
-  models:
-    heavy: "us.anthropic.claude-sonnet-4-20250514-v1:0"
-    medium: "us.amazon.nova-pro-v1:0"
-    light: "us.amazon.nova-lite-v1:0"
-  # Maximum LLM calls per run (default: 20). The intelligence layer makes
-  # ~10-15 calls with default settings. Increase if you have many papers or
-  # enable all intelligence features.
   max_calls_per_run: 25
+  primary:
+    base_url: "https://api.minimax.io/anthropic"
+    model: "MiniMax-M2.7"
+  fallback:
+    base_url: "https://openrouter.ai/api/v1/chat/completions"
+    models:
+      heavy: "qwen/qwen3.6-plus-preview"
+      medium: "stepfun/step-3.5-flash"
+      light: "stepfun/step-3.5-flash"
+
+# Newsletter source (from n8n email-ingestion workflow via Supabase)
+# Fetches classified newsletter emails and includes them in the briefing
+# Env vars: SUPABASE_URL, SUPABASE_SERVICE_KEY
+newsletter_source:
+  enabled: false
+  max_items: 20
+  mark_digested: true
+
+# GitHub trending repos (from n8n github-trending-digest workflow via Supabase)
+# Fetches trending repos stored in memory_entries table
+# Env vars: SUPABASE_URL, SUPABASE_SERVICE_KEY
+github_trending:
+  enabled: false
+  max_items: 20
 
 # Logging
 log_level: "INFO"

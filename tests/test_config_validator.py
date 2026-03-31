@@ -73,8 +73,8 @@ class TestValidateConfig:
         is_valid, messages = validate_config(config)
         assert is_valid is False
 
-    def test_invalid_bedrock_config(self):
-        config = {"arxiv_topics": ["test"], "bedrock": "bad"}
+    def test_invalid_llm_config(self):
+        config = {"arxiv_topics": ["test"], "llm": "bad"}
         is_valid, messages = validate_config(config)
         assert is_valid is False
 
@@ -98,13 +98,13 @@ class TestValidateConfig:
         is_valid, messages = validate_config(config)
         assert is_valid is False
 
-    def test_valid_bedrock_config(self):
+    def test_valid_llm_config(self):
         config = {
             "arxiv_topics": ["test"],
-            "bedrock": {
+            "llm": {
                 "enabled": True,
-                "region": "us-east-1",
-                "models": {"heavy": "some-model", "medium": "some-model", "light": "some-model"},
+                "primary": {"base_url": "https://api.minimax.io/anthropic", "model": "MiniMax-M2.7"},
+                "fallback": {"models": {"heavy": "some-model", "medium": "some-model", "light": "some-model"}},
             },
         }
         is_valid, messages = validate_config(config)

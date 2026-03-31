@@ -19,7 +19,7 @@ def minimal_config():
         "output_format": "kindle",
         "file_naming": "Atlas-Briefing-{yyyy}.{mm}.{dd}",
         "pdf": {"font_size": 10, "line_spacing": 1.5},
-        "bedrock": {"enabled": False},
+        "llm": {"enabled": False},
     }
 
 

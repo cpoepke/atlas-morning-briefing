@@ -34,8 +34,10 @@ from scripts.paper_scorer import PaperScorer
 from scripts.pdf_generator import PDFGenerator
 from scripts.email_distributor import EmailDistributor
 from scripts.config_validator import validate_config, check_environment
-from scripts.bedrock_client import BedrockClient
+from scripts.llm_client import LLMClient
 from scripts.intelligence import BriefingIntelligence
+from scripts.newsletter_scanner import NewsletterScanner
+from scripts.github_trending_scanner import GitHubTrendingScanner
 
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -48,7 +50,7 @@ class BriefingRunner:
     """Main orchestrator for morning briefing generation."""
 
     # Default section order
-    DEFAULT_SECTION_ORDER = ["stocks", "news", "top_papers", "blogs"]
+    DEFAULT_SECTION_ORDER = ["stocks", "news", "github_trending", "newsletters", "top_papers", "blogs"]
 
     def __init__(self, config: Dict[str, Any], dry_run: bool = False):
         """
@@ -68,6 +70,8 @@ class BriefingRunner:
             "blogs_found": 0,
             "stocks_fetched": 0,
             "news_found": 0,
+            "newsletters_found": 0,
+            "github_trending_found": 0,
             "intelligence_enabled": False,
             "errors": [],
             "pdf_generated": False,
@@ -75,10 +79,11 @@ class BriefingRunner:
             "elapsed_seconds": 0,
         }
 
-        # Initialize Bedrock client and intelligence layer
-        bedrock_config = config.get("bedrock", {})
-        self.bedrock = BedrockClient(bedrock_config)
-        self.intelligence = BriefingIntelligence(self.bedrock, config)
+        # Initialize LLM client and intelligence layer
+        llm_config = config.get("llm", config.get("bedrock", {}))
+        self.llm = LLMClient(llm_config)
+        self.intelligence = BriefingIntelligence(self.llm, config)
+        self.newsletter_scanner = None  # Initialized in run_newsletter_scan
         self.status["intelligence_enabled"] = self.intelligence.available
 
     def run_arxiv_scan(self, topics: Optional[List[str]] = None) -> List[Dict[str, Any]]:
@@ -202,6 +207,50 @@ class BriefingRunner:
         except Exception as e:
             logger.error(f"News aggregation failed: {e}")
             self.errors.append(f"News aggregation: {e}")
+            return []
+
+    def run_newsletter_scan(self) -> List[Dict[str, Any]]:
+        """Run newsletter scan from Supabase."""
+        try:
+            ns_config = self.config.get("newsletter_source", {})
+            if not ns_config.get("enabled", False):
+                return []
+
+            logger.info("=== Scanning Newsletters ===")
+            self.newsletter_scanner = NewsletterScanner(
+                supabase_url=ns_config.get("supabase_url"),
+                supabase_key=ns_config.get("supabase_key"),
+                max_items=ns_config.get("max_items", 20),
+            )
+            items = self.newsletter_scanner.scan()
+            self.status["newsletters_found"] = len(items)
+            logger.info(f"Found {len(items)} newsletter items")
+            return items
+
+        except Exception as e:
+            logger.error(f"Newsletter scan failed: {e}")
+            self.errors.append(f"Newsletter scan: {e}")
+            return []
+
+    def run_github_trending_scan(self) -> List[Dict[str, Any]]:
+        """Run GitHub trending scan from Supabase."""
+        try:
+            gt_config = self.config.get("github_trending", {})
+            if not gt_config.get("enabled", False):
+                return []
+
+            logger.info("=== Scanning GitHub Trending ===")
+            scanner = GitHubTrendingScanner(
+                max_items=gt_config.get("max_items", 20),
+            )
+            items = scanner.scan()
+            self.status["github_trending_found"] = len(items)
+            logger.info(f"Found {len(items)} trending repos")
+            return items
+
+        except Exception as e:
+            logger.error(f"GitHub trending scan failed: {e}")
+            self.errors.append(f"GitHub trending scan: {e}")
             return []
 
     def score_papers(self, papers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -351,6 +400,8 @@ class BriefingRunner:
         top_papers: List[Dict[str, Any]],
         synthesis: Optional[Dict[str, str]] = None,
         market_trend: str = "",
+        newsletters: Optional[List[Dict[str, Any]]] = None,
+        github_trending: Optional[List[Dict[str, Any]]] = None,
         weekly_deep_dive: str = "",
     ) -> str:
         """
@@ -411,6 +462,8 @@ class BriefingRunner:
         section_data = {
             "stocks": stocks,
             "news": news,
+            "newsletters": newsletters or [],
+            "github_trending": github_trending or [],
             "blogs": blogs,
             "top_papers": top_papers,
             "papers": papers,
@@ -425,6 +478,10 @@ class BriefingRunner:
                 md.append(self._render_stocks(data, market_trend=market_trend))
             elif section == "news":
                 md.append(self._render_news(data))
+            elif section == "github_trending":
+                md.append(self._render_github_trending(data))
+            elif section == "newsletters":
+                md.append(self._render_newsletters(data))
             elif section == "blogs":
                 md.append(self._render_blogs(data))
             elif section == "top_papers":
@@ -592,6 +649,45 @@ class BriefingRunner:
             md.append("\n")
         return "".join(md)
 
+    def _render_github_trending(self, repos: List[Dict[str, Any]]) -> str:
+        """Render GitHub trending repos section."""
+        md = ["## GitHub Trending\n\n"]
+        for repo in repos:
+            title = repo.get("title", "")
+            link = repo.get("link", "")
+            summary = repo.get("summary", "")
+            stars = repo.get("stars", "")
+            language = repo.get("language", "")
+            tags = []
+            if stars:
+                tags.append(f"{stars} stars")
+            if language:
+                tags.append(language)
+            tag_str = f" ({', '.join(tags)})" if tags else ""
+            if link:
+                md.append(f"**[{title}]({link})**{tag_str}\n")
+            else:
+                md.append(f"**{title}**{tag_str}\n")
+            if summary:
+                md.append(f"{summary}\n")
+            md.append("\n")
+        return "".join(md)
+
+    def _render_newsletters(self, newsletters: List[Dict[str, Any]]) -> str:
+        """Render newsletter highlights section."""
+        md = ["## Newsletter Highlights\n\n"]
+        for item in newsletters:
+            title = item.get("title", "Untitled")
+            source = item.get("source", "")
+            summary = item.get("summary", "")
+            category = item.get("category", "")
+            category_tag = f" [{category}]" if category else ""
+            md.append(f"**{title}** *({source})*{category_tag}\n")
+            if summary:
+                md.append(f"{summary}\n")
+            md.append("\n")
+        return "".join(md)
+
     def _ensure_paper_summaries(
         self, papers: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
@@ -732,7 +828,7 @@ class BriefingRunner:
             return False
 
     def distribute_briefing(
-        self, markdown_content: str, pdf_path: str, subject: str
+        self, markdown_content: str, pdf_path: Optional[str], subject: str
     ) -> Dict[str, bool]:
         """
         Distribute briefing to all configured channels.
@@ -871,17 +967,21 @@ class BriefingRunner:
             logger.info("=== Intelligence Layer: Expanding Topics ===")
             topics = self.intelligence.expand_topics(topics)
 
-        # --- Run scanners in parallel (papers + blogs + stocks are independent) ---
+        # --- Run scanners in parallel (papers + blogs + stocks + newsletters) ---
         from concurrent.futures import ThreadPoolExecutor
-        logger.info("=== Parallel data fetch (papers/blogs/stocks) ===")
-        with ThreadPoolExecutor(max_workers=3) as pool:
+        logger.info("=== Parallel data fetch (papers/blogs/stocks/newsletters) ===")
+        with ThreadPoolExecutor(max_workers=5) as pool:
             fut_papers = pool.submit(self.run_arxiv_scan, topics)
             fut_blogs = pool.submit(self.run_blog_scan)
             fut_stocks = pool.submit(self.run_stock_fetch)
+            fut_newsletters = pool.submit(self.run_newsletter_scan)
+            fut_github = pool.submit(self.run_github_trending_scan)
 
             papers = fut_papers.result()
             blogs = fut_blogs.result()
             stocks = fut_stocks.result()
+            newsletters = fut_newsletters.result()
+            github_trending = fut_github.result()
 
         # --- Generate dynamic news queries (intelligence layer) ---
         news_queries = self.config.get("news_queries", [])
@@ -1002,7 +1102,7 @@ class BriefingRunner:
             weekly_items = []
 
         # --- Check if we have any data ---
-        has_data = any([papers, blogs, stocks, news])
+        has_data = any([papers, blogs, stocks, news, newsletters, github_trending])
         if not has_data:
             logger.error("No data collected from any source")
             self.status["elapsed_seconds"] = round(time.time() - start_time, 1)
@@ -1016,6 +1116,8 @@ class BriefingRunner:
             papers, blogs, stocks, news, top_papers, synthesis,
             market_trend=market_trend,
             weekly_deep_dive=weekly_deep_dive,
+            newsletters=newsletters,
+            github_trending=github_trending,
         )
 
         # --- Save markdown ---
@@ -1027,18 +1129,25 @@ class BriefingRunner:
         except IOError as e:
             logger.warning(f"Failed to save markdown: {e}")
 
-        # --- Generate PDF ---
-        pdf_path = f"{filename}.pdf"
-        pdf_success = self.generate_pdf(markdown_content, pdf_path)
+        # --- Generate PDF (skip for HTML-only mode) ---
+        pdf_path = None
+        if self.config.get("output_format", "kindle") != "html":
+            pdf_path = f"{filename}.pdf"
+            pdf_success = self.generate_pdf(markdown_content, pdf_path)
 
-        if not pdf_success:
-            logger.error("Failed to generate PDF")
-            self.status["elapsed_seconds"] = round(time.time() - start_time, 1)
-            self.save_status()
-            return 2
+            if not pdf_success:
+                logger.error("Failed to generate PDF")
+                self.status["elapsed_seconds"] = round(time.time() - start_time, 1)
+                self.save_status()
+                return 2
 
-        # --- Distribute to all channels (Kindle PDF + HTML email) ---
+        # --- Distribute to all channels ---
         self.distribute_briefing(markdown_content, pdf_path, filename)
+
+        # --- Mark newsletters as digested in Supabase ---
+        ns_config = self.config.get("newsletter_source", {})
+        if self.newsletter_scanner and ns_config.get("mark_digested", True):
+            self.newsletter_scanner.mark_digested()
 
         # --- Save state for cross-day tracking ---
         # Save updated trending_topics and weekly_items from current run

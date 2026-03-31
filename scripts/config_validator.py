@@ -116,23 +116,25 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
     if output_format and output_format not in ("kindle", "a4", "letter"):
         errors.append(f"'output_format' must be 'kindle', 'a4', or 'letter', got '{output_format}'")
 
-    # --- Bedrock config ---
-    bedrock = config.get("bedrock")
-    if bedrock is not None:
-        if not isinstance(bedrock, dict):
-            errors.append("'bedrock' must be a dictionary")
+    # --- LLM config ---
+    llm = config.get("llm")
+    if llm is not None:
+        if not isinstance(llm, dict):
+            errors.append("'llm' must be a dictionary")
         else:
-            models = bedrock.get("models")
-            if models is not None:
-                if not isinstance(models, dict):
-                    errors.append("bedrock.models must be a dictionary")
-                else:
-                    for tier in models:
-                        if tier not in ("heavy", "medium", "light"):
-                            warnings.append(
-                                f"bedrock.models.{tier} is not a recognized tier "
-                                "(expected: heavy, medium, light)"
-                            )
+            fallback = llm.get("fallback", {})
+            if isinstance(fallback, dict):
+                models = fallback.get("models")
+                if models is not None:
+                    if not isinstance(models, dict):
+                        errors.append("llm.fallback.models must be a dictionary")
+                    else:
+                        for tier in models:
+                            if tier not in ("heavy", "medium", "light"):
+                                warnings.append(
+                                    f"llm.fallback.models.{tier} is not a recognized tier "
+                                    "(expected: heavy, medium, light)"
+                                )
 
     # --- Log results ---
     for w in warnings:

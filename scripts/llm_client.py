@@ -153,7 +153,7 @@ class LLMClient:
         return None
 
     # Minimum token budget for MiniMax M2.7 (reasoning model needs room to think + respond)
-    _MINIMAX_MIN_TOKENS = 4096
+    _MINIMAX_MIN_TOKENS = 8192
 
     def _invoke_minimax(
         self,

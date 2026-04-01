@@ -232,6 +232,9 @@ class LLMClient:
             resp.raise_for_status()
             data = resp.json()
             text = data["choices"][0]["message"]["content"]
+            if text is None:
+                logger.warning(f"OpenRouter returned None content for {model} (likely reasoning-only response)")
+                return None
             logger.info(f"OpenRouter response received ({len(text)} chars)")
             return text
         except (requests.RequestException, KeyError, IndexError) as e:

@@ -84,7 +84,7 @@ class TestLLMClientInvoke:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {
-            "content": [{"type": "text", "text": "Hello from MiniMax"}],
+            "choices": [{"message": {"content": "Hello from MiniMax"}, "finish_reason": "stop"}],
         }
         mock_resp.raise_for_status = MagicMock()
         mock_post.return_value = mock_resp
@@ -97,12 +97,13 @@ class TestLLMClientInvoke:
         assert result == "Hello from MiniMax"
         mock_post.assert_called_once()
 
-        # Verify request format
+        # Verify request format (native OpenAI-compatible endpoint)
         call_args = mock_post.call_args
         assert "api.minimax.io" in call_args[0][0]
+        assert "/v1/chat/completions" in call_args[0][0]
         body = call_args[1]["json"]
         assert body["model"] == "MiniMax-M2.7"
-        assert body["messages"][0]["content"] == "test prompt"
+        assert body["messages"][-1]["content"] == "test prompt"
 
     @patch("scripts.llm_client.requests.post")
     def test_minimax_failure_falls_back_to_openrouter(self, mock_post):
@@ -132,7 +133,7 @@ class TestLLMClientInvoke:
     def test_system_prompt_passed(self, mock_post):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
-            "content": [{"type": "text", "text": "response"}],
+            "choices": [{"message": {"content": "response"}, "finish_reason": "stop"}],
         }
         mock_resp.raise_for_status = MagicMock()
         mock_post.return_value = mock_resp
@@ -143,7 +144,9 @@ class TestLLMClientInvoke:
 
         client.invoke("prompt", system_prompt="You are helpful")
         body = mock_post.call_args[1]["json"]
-        assert body["system"] == "You are helpful"
+        # System prompt is passed as first message in OpenAI format
+        assert body["messages"][0]["role"] == "system"
+        assert body["messages"][0]["content"] == "You are helpful"
 
 
 class TestExtractAnthropicText:

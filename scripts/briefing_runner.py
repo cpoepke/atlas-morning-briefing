@@ -38,6 +38,8 @@ from scripts.llm_client import LLMClient
 from scripts.intelligence import BriefingIntelligence
 from scripts.newsletter_scanner import NewsletterScanner
 from scripts.github_trending_scanner import GitHubTrendingScanner
+from opentelemetry import trace
+from scripts.tracing import setup_tracing, get_tracer
 
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -85,6 +87,10 @@ class BriefingRunner:
         self.intelligence = BriefingIntelligence(self.llm, config)
         self.newsletter_scanner = None  # Initialized in run_newsletter_scan
         self.status["intelligence_enabled"] = self.intelligence.available
+
+        # Initialize OTel tracing (no-op if OTEL_EXPORTER_OTLP_ENDPOINT not set)
+        setup_tracing(config)
+        self._tracer = get_tracer()
 
     def run_arxiv_scan(self, topics: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """Run arxiv paper scan."""
@@ -957,192 +963,205 @@ class BriefingRunner:
         """
         start_time = time.time()
         logger.info("=== Starting Morning Briefing ===")
+        now = datetime.now()
+        today_str = now.strftime("%Y-%m-%d")
 
-        # --- Load previous state for cross-day tracking ---
-        previous_state = self._load_previous_state()
+        with self._tracer.start_as_current_span("atlas.briefing.run") as root_span:
+            root_span.set_attribute("briefing.date", today_str)
+            root_span.set_attribute("briefing.dry_run", self.dry_run)
 
-        # --- Topic expansion (intelligence layer) ---
-        topics = self.config.get("arxiv_topics", [])
-        if self.intelligence.available:
-            logger.info("=== Intelligence Layer: Expanding Topics ===")
-            topics = self.intelligence.expand_topics(topics)
+            # --- Load previous state for cross-day tracking ---
+            previous_state = self._load_previous_state()
 
-        # --- Run scanners in parallel (papers + blogs + stocks + newsletters) ---
-        from concurrent.futures import ThreadPoolExecutor
-        logger.info("=== Parallel data fetch (papers/blogs/stocks/newsletters) ===")
-        with ThreadPoolExecutor(max_workers=5) as pool:
-            fut_papers = pool.submit(self.run_arxiv_scan, topics)
-            fut_blogs = pool.submit(self.run_blog_scan)
-            fut_stocks = pool.submit(self.run_stock_fetch)
-            fut_newsletters = pool.submit(self.run_newsletter_scan)
-            fut_github = pool.submit(self.run_github_trending_scan)
+            # --- Topic expansion (intelligence layer) ---
+            topics = self.config.get("arxiv_topics", [])
+            if self.intelligence.available:
+                logger.info("=== Intelligence Layer: Expanding Topics ===")
+                topics = self.intelligence.expand_topics(topics)
 
-            papers = fut_papers.result()
-            blogs = fut_blogs.result()
-            stocks = fut_stocks.result()
-            newsletters = fut_newsletters.result()
-            github_trending = fut_github.result()
+            # --- Run scanners in parallel (papers + blogs + stocks + newsletters) ---
+            from concurrent.futures import ThreadPoolExecutor
+            with self._tracer.start_as_current_span("atlas.fetch"):
+                logger.info("=== Parallel data fetch (papers/blogs/stocks/newsletters) ===")
+                with ThreadPoolExecutor(max_workers=5) as pool:
+                    fut_papers = pool.submit(self.run_arxiv_scan, topics)
+                    fut_blogs = pool.submit(self.run_blog_scan)
+                    fut_stocks = pool.submit(self.run_stock_fetch)
+                    fut_newsletters = pool.submit(self.run_newsletter_scan)
+                    fut_github = pool.submit(self.run_github_trending_scan)
 
-        # --- Generate dynamic news queries (intelligence layer) ---
-        news_queries = self.config.get("news_queries", [])
-        if self.intelligence.available:
-            logger.info("=== Intelligence Layer: Generating Dynamic Queries ===")
-            news_queries = self.intelligence.generate_dynamic_queries(
-                previous_state, news_queries
-            )
+                    papers = fut_papers.result()
+                    blogs = fut_blogs.result()
+                    stocks = fut_stocks.result()
+                    newsletters = fut_newsletters.result()
+                    github_trending = fut_github.result()
 
-        news = self.run_news_aggregation(queries=news_queries)
+            # --- Generate dynamic news queries (intelligence layer) ---
+            news_queries = self.config.get("news_queries", [])
+            if self.intelligence.available:
+                logger.info("=== Intelligence Layer: Generating Dynamic Queries ===")
+                news_queries = self.intelligence.generate_dynamic_queries(
+                    previous_state, news_queries
+                )
 
-        # --- Cross-section deduplication ---
-        news, blogs = self.deduplicate_news_and_blogs(news, blogs)
+            with self._tracer.start_as_current_span("atlas.fetch.news"):
+                news = self.run_news_aggregation(queries=news_queries)
 
-        # --- Deduplicate similar papers by title ---
-        papers = self.deduplicate_similar_papers(papers)
+            # --- Cross-section deduplication ---
+            news, blogs = self.deduplicate_news_and_blogs(news, blogs)
 
-        # --- Cross-day deduplication (skip items from yesterday) ---
-        papers, blogs, news = self._dedup_against_previous(
-            papers, blogs, news, previous_state
-        )
+            # --- Deduplicate similar papers by title ---
+            papers = self.deduplicate_similar_papers(papers)
 
-        # --- Intelligence layer: enrich data ---
-        synthesis = {}
-        emerging_themes = []
-        if self.intelligence.available:
-            logger.info("=== Intelligence Layer: Enriching Data ===")
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-
-            # Two-stage relevance filtering (NEW) — must run first (reduces paper count)
-            interest_profile = self.config.get("interest_profile")
-            if interest_profile:
-                logger.info("=== Intelligence Layer: Stage 1 Relevance Filtering ===")
-                papers = self.intelligence.filter_papers_by_relevance(papers, interest_profile)
-
-            # --- Parallel batch 1: papers, news, blogs are independent ---
-            logger.info("=== Intelligence Layer: Parallel enrichment (papers/news/blogs) ===")
-            with ThreadPoolExecutor(max_workers=3) as pool:
-                fut_papers = pool.submit(self._enrich_papers, papers, topics)
-                fut_news = pool.submit(self.intelligence.rank_and_summarize_news, news, topics)
-                fut_blogs = pool.submit(self.intelligence.rank_and_summarize_blogs, blogs, topics)
-
-                papers = fut_papers.result()
-                news = fut_news.result()
-                blogs = fut_blogs.result()
-
-            # --- Parallel batch 2: stocks + themes (both depend on news) ---
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                fut_stocks = pool.submit(self.intelligence.correlate_stocks_and_news, stocks, news)
-                fut_themes = pool.submit(self.intelligence.detect_emerging_themes, papers, blogs, news)
-
-                stocks = fut_stocks.result()
-                emerging_themes = fut_themes.result()
-
-            # Track trending topics across days (Feature 1)
-            previous_state, papers, blogs, news = self.intelligence.track_trending(
+            # --- Cross-day deduplication (skip items from yesterday) ---
+            papers, blogs, news = self._dedup_against_previous(
                 papers, blogs, news, previous_state
             )
 
-        # --- Market trend analysis (must happen after correlation) ---
-        market_trend = ""
-        if self.intelligence.available and stocks:
-            market_trend = self._analyze_market_trend(stocks)
+            # --- Intelligence layer: enrich data ---
+            synthesis = {}
+            emerging_themes = []
+            if self.intelligence.available:
+                with self._tracer.start_as_current_span("atlas.enrich"):
+                    logger.info("=== Intelligence Layer: Enriching Data ===")
+                    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        # --- Score papers (combines TF-IDF + semantic if available) ---
-        top_papers = self.score_papers(papers)
+                    # Two-stage relevance filtering (NEW) — must run first (reduces paper count)
+                    interest_profile = self.config.get("interest_profile")
+                    if interest_profile:
+                        logger.info("=== Intelligence Layer: Stage 1 Relevance Filtering ===")
+                        papers = self.intelligence.filter_papers_by_relevance(papers, interest_profile)
 
-        # --- Intelligence layer: assess top papers & synthesize ---
-        if self.intelligence.available:
-            top_papers = self.intelligence.assess_reproduction_feasibility(top_papers)
+                    # --- Parallel batch 1: papers, news, blogs are independent ---
+                    logger.info("=== Intelligence Layer: Parallel enrichment (papers/news/blogs) ===")
+                    with ThreadPoolExecutor(max_workers=3) as pool:
+                        fut_papers = pool.submit(self._enrich_papers, papers, topics)
+                        fut_news = pool.submit(self.intelligence.rank_and_summarize_news, news, topics)
+                        fut_blogs = pool.submit(self.intelligence.rank_and_summarize_blogs, blogs, topics)
 
-            # Ensure top 3 papers all have summaries (batched)
-            top_papers = self._ensure_paper_summaries(top_papers[:3]) + top_papers[3:]
+                        papers = fut_papers.result()
+                        news = fut_news.result()
+                        blogs = fut_blogs.result()
 
-            synthesis = self.intelligence.synthesize_briefing(
-                papers, blogs[:5], stocks, news[:5], top_papers[:3],
-                emerging_themes=emerging_themes,
-                previous_state=previous_state,
-            )
+                    # --- Parallel batch 2: stocks + themes (both depend on news) ---
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        fut_stocks = pool.submit(self.intelligence.correlate_stocks_and_news, stocks, news)
+                        fut_themes = pool.submit(self.intelligence.detect_emerging_themes, papers, blogs, news)
 
-            # Feature 3: Competitive Intelligence (entity tracking)
-            tracked_entities = self.config.get("tracked_entities", [])
-            entity_mentions = []
-            if tracked_entities:
-                logger.info("=== Intelligence Layer: Entity Tracking ===")
-                entity_mentions = self.intelligence.detect_entity_mentions(
-                    papers, blogs, news, tracked_entities
-                )
-                # Add to synthesis for rendering in Executive Summary
-                synthesis["entity_mentions"] = entity_mentions
+                        stocks = fut_stocks.result()
+                        emerging_themes = fut_themes.result()
 
-        # Feature 2: Weekly Deep Dive (accumulate items & generate on Saturday)
-        now = datetime.now()
-        is_saturday = now.weekday() == 5
-        weekly_deep_dive = ""
-        weekly_items = previous_state.get("weekly_items", [])
+                    # Track trending topics across days (Feature 1)
+                    previous_state, papers, blogs, news = self.intelligence.track_trending(
+                        papers, blogs, news, previous_state
+                    )
 
-        # Accumulate today's top items for the week
-        today_str = now.strftime("%Y-%m-%d")
-        for paper in top_papers[:3]:
-            weekly_items.append({
-                "date": today_str,
-                "type": "paper",
-                "title": paper.get("title", ""),
-            })
-        for article in news[:3]:
-            weekly_items.append({
-                "date": today_str,
-                "type": "news",
-                "title": article.get("title", ""),
-            })
+            # --- Market trend analysis (must happen after correlation) ---
+            market_trend = ""
+            if self.intelligence.available and stocks:
+                market_trend = self._analyze_market_trend(stocks)
 
-        # On Saturday, generate the deep dive and clear weekly_items
-        if is_saturday and self.intelligence.available and weekly_items:
-            logger.info("=== Intelligence Layer: Weekly Deep Dive (Saturday) ===")
-            weekly_deep_dive = self.intelligence.generate_weekly_deep_dive(weekly_items)
-            # Clear weekly items after generation
-            weekly_items = []
+            # --- Score papers (combines TF-IDF + semantic if available) ---
+            top_papers = self.score_papers(papers)
 
-        # --- Check if we have any data ---
-        has_data = any([papers, blogs, stocks, news, newsletters, github_trending])
-        if not has_data:
-            logger.error("No data collected from any source")
-            self.status["elapsed_seconds"] = round(time.time() - start_time, 1)
-            self.save_status()
-            return 2
+            # --- Intelligence layer: assess top papers & synthesize ---
+            if self.intelligence.available:
+                with self._tracer.start_as_current_span("atlas.synthesize"):
+                    top_papers = self.intelligence.assess_reproduction_feasibility(top_papers)
 
-        # --- Generate markdown briefing ---
-        filename = self._format_filename(now)
-        self._briefing_title = filename
-        markdown_content = self.generate_markdown_briefing(
-            papers, blogs, stocks, news, top_papers, synthesis,
-            market_trend=market_trend,
-            weekly_deep_dive=weekly_deep_dive,
-            newsletters=newsletters,
-            github_trending=github_trending,
-        )
+                    # Ensure top 3 papers all have summaries (batched)
+                    top_papers = self._ensure_paper_summaries(top_papers[:3]) + top_papers[3:]
 
-        # --- Save markdown ---
-        md_path = f"{filename}.md"
-        try:
-            with open(md_path, "w", encoding="utf-8") as f:
-                f.write(markdown_content)
-            logger.info(f"Saved markdown: {md_path}")
-        except IOError as e:
-            logger.warning(f"Failed to save markdown: {e}")
+                    synthesis = self.intelligence.synthesize_briefing(
+                        papers, blogs[:5], stocks, news[:5], top_papers[:3],
+                        emerging_themes=emerging_themes,
+                        previous_state=previous_state,
+                        newsletters=newsletters,
+                        github_trending=github_trending,
+                    )
 
-        # --- Generate PDF (skip for HTML-only mode) ---
-        pdf_path = None
-        if self.config.get("output_format", "kindle") != "html":
-            pdf_path = f"{filename}.pdf"
-            pdf_success = self.generate_pdf(markdown_content, pdf_path)
+                    # Feature 3: Competitive Intelligence (entity tracking)
+                    tracked_entities = self.config.get("tracked_entities", [])
+                    entity_mentions = []
+                    if tracked_entities:
+                        logger.info("=== Intelligence Layer: Entity Tracking ===")
+                        entity_mentions = self.intelligence.detect_entity_mentions(
+                            papers, blogs, news, tracked_entities
+                        )
+                        # Add to synthesis for rendering in Executive Summary
+                        synthesis["entity_mentions"] = entity_mentions
 
-            if not pdf_success:
-                logger.error("Failed to generate PDF")
+            # Feature 2: Weekly Deep Dive (accumulate items & generate on Saturday)
+            is_saturday = now.weekday() == 5
+            weekly_deep_dive = ""
+            weekly_items = previous_state.get("weekly_items", [])
+
+            # Accumulate today's top items for the week
+            for paper in top_papers[:3]:
+                weekly_items.append({
+                    "date": today_str,
+                    "type": "paper",
+                    "title": paper.get("title", ""),
+                })
+            for article in news[:3]:
+                weekly_items.append({
+                    "date": today_str,
+                    "type": "news",
+                    "title": article.get("title", ""),
+                })
+
+            # On Saturday, generate the deep dive and clear weekly_items
+            if is_saturday and self.intelligence.available and weekly_items:
+                logger.info("=== Intelligence Layer: Weekly Deep Dive (Saturday) ===")
+                weekly_deep_dive = self.intelligence.generate_weekly_deep_dive(weekly_items)
+                # Clear weekly items after generation
+                weekly_items = []
+
+            # --- Check if we have any data ---
+            has_data = any([papers, blogs, stocks, news, newsletters, github_trending])
+            if not has_data:
+                logger.error("No data collected from any source")
                 self.status["elapsed_seconds"] = round(time.time() - start_time, 1)
                 self.save_status()
+                root_span.set_status(trace.StatusCode.ERROR, "No data collected")
                 return 2
 
-        # --- Distribute to all channels ---
-        self.distribute_briefing(markdown_content, pdf_path, filename)
+            with self._tracer.start_as_current_span("atlas.render"):
+                # --- Generate markdown briefing ---
+                filename = self._format_filename(now)
+                self._briefing_title = filename
+                markdown_content = self.generate_markdown_briefing(
+                    papers, blogs, stocks, news, top_papers, synthesis,
+                    market_trend=market_trend,
+                    weekly_deep_dive=weekly_deep_dive,
+                    newsletters=newsletters,
+                    github_trending=github_trending,
+                )
+
+                # --- Save markdown ---
+                md_path = f"{filename}.md"
+                try:
+                    with open(md_path, "w", encoding="utf-8") as f:
+                        f.write(markdown_content)
+                    logger.info(f"Saved markdown: {md_path}")
+                except IOError as e:
+                    logger.warning(f"Failed to save markdown: {e}")
+
+                # --- Generate PDF (skip for HTML-only mode) ---
+                pdf_path = None
+                if self.config.get("output_format", "kindle") != "html":
+                    pdf_path = f"{filename}.pdf"
+                    pdf_success = self.generate_pdf(markdown_content, pdf_path)
+
+                    if not pdf_success:
+                        logger.error("Failed to generate PDF")
+                        self.status["elapsed_seconds"] = round(time.time() - start_time, 1)
+                        self.save_status()
+                        root_span.set_status(trace.StatusCode.ERROR, "PDF generation failed")
+                        return 2
+
+            # --- Distribute to all channels ---
+            self.distribute_briefing(markdown_content, pdf_path, filename)
 
         # --- Mark newsletters as digested in Supabase ---
         ns_config = self.config.get("newsletter_source", {})

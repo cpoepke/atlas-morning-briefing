@@ -197,7 +197,8 @@ class BriefingIntelligence:
         )
 
         result = self.bedrock.invoke(
-            prompt, tier="heavy", max_tokens=2000, system_prompt=SYSTEM_PROMPT
+            prompt, tier="heavy", max_tokens=2000, system_prompt=SYSTEM_PROMPT,
+            name="filter_papers",
         )
         if not result:
             logger.warning("Stage 1 filtering failed, returning all papers")
@@ -286,7 +287,7 @@ class BriefingIntelligence:
             "- Multi-agent orchestration frameworks release"
         )
 
-        result = self.bedrock.invoke(prompt, tier="light", max_tokens=300)
+        result = self.bedrock.invoke(prompt, tier="light", max_tokens=300, name="dynamic_queries")
         if not result:
             logger.info("Dynamic query generation failed, using static queries only")
             return static_queries
@@ -333,7 +334,7 @@ class BriefingIntelligence:
             f"<topics>\n{topic_list}\n</topics>"
         )
 
-        result = self.bedrock.invoke(prompt, tier="light", max_tokens=256)
+        result = self.bedrock.invoke(prompt, tier="light", max_tokens=256, name="expand_topics")
         if not result:
             return topics
 
@@ -390,7 +391,8 @@ class BriefingIntelligence:
         )
 
         result = self.bedrock.invoke(
-            prompt, tier="medium", max_tokens=1500, system_prompt=SYSTEM_PROMPT
+            prompt, tier="medium", max_tokens=1500, system_prompt=SYSTEM_PROMPT,
+            name="summarize_papers",
         )
         if not result:
             return papers
@@ -440,7 +442,8 @@ class BriefingIntelligence:
         )
 
         result = self.bedrock.invoke(
-            prompt, tier="medium", max_tokens=1000, system_prompt=SYSTEM_PROMPT
+            prompt, tier="medium", max_tokens=1000, system_prompt=SYSTEM_PROMPT,
+            name="score_papers",
         )
         if not result:
             return papers
@@ -525,7 +528,8 @@ class BriefingIntelligence:
         )
 
         result = self.bedrock.invoke(
-            prompt, tier="medium", max_tokens=1000, system_prompt=SYSTEM_PROMPT
+            prompt, tier="medium", max_tokens=1000, system_prompt=SYSTEM_PROMPT,
+            name="assess_repro",
         )
         if not result:
             return papers
@@ -627,7 +631,8 @@ class BriefingIntelligence:
         )
 
         result = self.bedrock.invoke(
-            prompt, tier="medium", max_tokens=1000, system_prompt=SYSTEM_PROMPT
+            prompt, tier="medium", max_tokens=1000, system_prompt=SYSTEM_PROMPT,
+            name="rank_news",
         )
         if not result:
             return news[:5]
@@ -654,7 +659,8 @@ class BriefingIntelligence:
         retry_result = self.bedrock.invoke(
             f"From these articles, pick the 5 most important for an AI researcher. "
             f"Format EXACTLY as: [number] summary sentence.\n\n{articles_block}",
-            tier="medium", max_tokens=800, system_prompt=SYSTEM_PROMPT
+            tier="medium", max_tokens=800, system_prompt=SYSTEM_PROMPT,
+            name="rank_news_retry",
         )
         if retry_result:
             parsed_retry = self._parse_ranked_response(retry_result)
@@ -715,7 +721,8 @@ class BriefingIntelligence:
         )
 
         result = self.bedrock.invoke(
-            prompt, tier="light", max_tokens=800, system_prompt=SYSTEM_PROMPT
+            prompt, tier="light", max_tokens=800, system_prompt=SYSTEM_PROMPT,
+            name="rank_blogs",
         )
         if not result:
             return blogs[:5]
@@ -809,7 +816,8 @@ class BriefingIntelligence:
         )
 
         result = self.bedrock.invoke(
-            prompt, tier="heavy", max_tokens=500, system_prompt=SYSTEM_PROMPT
+            prompt, tier="heavy", max_tokens=500, system_prompt=SYSTEM_PROMPT,
+            name="stock_correlation",
         )
         if not result:
             return stocks
@@ -875,7 +883,7 @@ class BriefingIntelligence:
             "respond with NONE."
         )
 
-        result = self.bedrock.invoke(prompt, tier="light", max_tokens=300)
+        result = self.bedrock.invoke(prompt, tier="light", max_tokens=300, name="detect_themes")
         if not result or "NONE" in result.upper():
             return []
 
@@ -898,6 +906,8 @@ class BriefingIntelligence:
         top_papers: List[Dict[str, Any]],
         emerging_themes: Optional[List[str]] = None,
         previous_state: Optional[Dict[str, Any]] = None,
+        newsletters: Optional[List[Dict[str, Any]]] = None,
+        github_trending: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, str]:
         """
         Synthesize cross-section connections and generate editorial content.
@@ -912,6 +922,8 @@ class BriefingIntelligence:
             top_papers: Top-scored papers.
             emerging_themes: Emerging themes detected from today's content.
             previous_state: Previous briefing state for trend tracking.
+            newsletters: Newsletter items from Supabase.
+            github_trending: GitHub trending repos from Supabase.
 
         Returns:
             Dictionary with key:
@@ -964,6 +976,20 @@ class BriefingIntelligence:
                     + (f" -- {reason}" if reason else "")
                 )
             sections.append("TOP PAPERS FOR REPRODUCTION:\n" + "\n".join(top_items))
+
+        if newsletters:
+            nl_items = [
+                f"- [{item.get('source', '')}] {item.get('title', '')}"
+                for item in newsletters[:8]
+            ]
+            sections.append("NEWSLETTERS:\n" + "\n".join(nl_items))
+
+        if github_trending:
+            gh_items = [
+                f"- {repo.get('title', '')} ({repo.get('stars', '')} stars, {repo.get('language', '')})"
+                for repo in github_trending[:8]
+            ]
+            sections.append("GITHUB TRENDING:\n" + "\n".join(gh_items))
 
         if emerging_themes:
             sections.append(
@@ -1024,7 +1050,8 @@ class BriefingIntelligence:
         )
 
         result = self.bedrock.invoke(
-            prompt, tier="heavy", max_tokens=1000, system_prompt=SYSTEM_PROMPT
+            prompt, tier="heavy", max_tokens=1000, system_prompt=SYSTEM_PROMPT,
+            name="synthesize_briefing",
         )
         if not result:
             return {}
@@ -1103,7 +1130,10 @@ class BriefingIntelligence:
             "[5] NEW claude-3.5-haiku\n"
         )
 
-        result = self.bedrock.invoke(prompt, tier="light", max_tokens=800, system_prompt=SYSTEM_PROMPT)
+        result = self.bedrock.invoke(
+            prompt, tier="light", max_tokens=800, system_prompt=SYSTEM_PROMPT,
+            name="track_trending",
+        )
         if not result:
             logger.info("Trending tracking skipped (LLM unavailable)")
             return state, papers, blogs, news
@@ -1313,7 +1343,8 @@ class BriefingIntelligence:
         )
 
         result = self.bedrock.invoke(
-            prompt, tier="heavy", max_tokens=1500, system_prompt=SYSTEM_PROMPT
+            prompt, tier="heavy", max_tokens=1500, system_prompt=SYSTEM_PROMPT,
+            name="weekly_deep_dive",
         )
 
         if result:

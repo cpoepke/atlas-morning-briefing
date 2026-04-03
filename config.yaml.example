@@ -165,11 +165,21 @@ llm:
       medium: "stepfun/step-3.5-flash:free"
       light: "stepfun/step-3.5-flash:free"
 
+# OpenTelemetry tracing (optional)
+# Configure via standard OTel env vars:
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318   (e.g. Grafana Tempo, Jaeger, Langfuse OTel)
+#   OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <token>
+#   OTEL_SERVICE_NAME=atlas-morning-briefing  (optional override)
+# Set enabled: false to suppress all tracing even when env vars are present
+otel:
+  enabled: true
+  service_name: "atlas-morning-briefing"
+
 # Newsletter source (from n8n email-ingestion workflow via Supabase)
 # Fetches classified newsletter emails and includes them in the briefing
 # Env vars: SUPABASE_URL, SUPABASE_API_KEY_N8N_ATLAS_MORNING_BRIEF
 newsletter_source:
-  enabled: false
+  enabled: true
   max_items: 20
   mark_digested: true
 
@@ -177,7 +187,7 @@ newsletter_source:
 # Fetches trending repos stored in memory_entries table
 # Env vars: SUPABASE_URL, SUPABASE_API_KEY_N8N_ATLAS_MORNING_BRIEF
 github_trending:
-  enabled: false
+  enabled: true
   max_items: 20
 
 # Logging

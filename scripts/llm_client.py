@@ -14,6 +14,9 @@ import re
 from typing import Any, Dict, Optional
 
 import requests
+from opentelemetry import trace
+
+_llm_tracer = trace.get_tracer("atlas.llm")
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -104,6 +107,7 @@ class LLMClient:
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         system_prompt: Optional[str] = None,
+        name: str = "llm_call",
     ) -> Optional[str]:
         """
         Invoke an LLM model. Tries primary (MiniMax), falls back to OpenRouter.
@@ -114,6 +118,7 @@ class LLMClient:
             max_tokens: Override default max tokens.
             temperature: Override default temperature.
             system_prompt: Optional system prompt.
+            name: Span name used for OTel tracing (e.g. "synthesize_briefing").
 
         Returns:
             Model response text, or None if invocation fails.
@@ -133,24 +138,46 @@ class LLMClient:
         tokens = max_tokens or self.max_tokens
         temp = temperature if temperature is not None else self.temperature
 
-        # Try primary (MiniMax)
-        if self._primary_api_key:
-            result = self._invoke_minimax(prompt, tokens, temp, system_prompt)
-            if result is not None:
-                return result
-            logger.warning("MiniMax invocation failed, trying fallback")
+        with _llm_tracer.start_as_current_span(name) as span:
+            span.set_attribute("gen_ai.operation.name", "chat")
+            span.set_attribute("gen_ai.request.tier", tier)
+            span.set_attribute("gen_ai.request.max_tokens", tokens)
+            span.set_attribute("gen_ai.request.temperature", temp)
 
-        # Try fallback (OpenRouter)
-        if self._fallback_api_key:
-            model = self._fallback_models.get(tier, self._fallback_models["medium"])
-            result = self._invoke_openrouter(
-                prompt, model, tokens, temp, system_prompt
-            )
-            if result is not None:
-                return result
+            result = None
+            used_fallback = False
 
-        logger.error("All LLM providers failed")
-        return None
+            # Try primary (MiniMax)
+            if self._primary_api_key:
+                span.set_attribute("gen_ai.request.model", self._primary_model)
+                span.set_attribute("gen_ai.system", "minimax")
+                result, usage = self._invoke_minimax(prompt, tokens, temp, system_prompt)
+                if result is not None:
+                    span.set_attribute("gen_ai.usage.input_tokens", usage.get("input_tokens", 0))
+                    span.set_attribute("gen_ai.usage.output_tokens", usage.get("output_tokens", 0))
+                else:
+                    logger.warning("MiniMax invocation failed, trying fallback")
+
+            # Try fallback (OpenRouter)
+            if result is None and self._fallback_api_key:
+                fallback_model = self._fallback_models.get(tier, self._fallback_models["medium"])
+                span.set_attribute("gen_ai.request.model", fallback_model)
+                span.set_attribute("gen_ai.system", "openrouter")
+                result, usage = self._invoke_openrouter(
+                    prompt, fallback_model, tokens, temp, system_prompt
+                )
+                if result is not None:
+                    used_fallback = True
+                    span.set_attribute("gen_ai.usage.input_tokens", usage.get("input_tokens", 0))
+                    span.set_attribute("gen_ai.usage.output_tokens", usage.get("output_tokens", 0))
+
+            span.set_attribute("gen_ai.fallback_used", used_fallback)
+
+            if result is None:
+                logger.error("All LLM providers failed")
+                span.set_status(trace.StatusCode.ERROR, "All LLM providers failed")
+
+            return result
 
     # Minimum token budget for MiniMax M2.7 (reasoning model needs room to think + respond)
     _MINIMAX_MIN_TOKENS = 8192
@@ -161,8 +188,12 @@ class LLMClient:
         max_tokens: int,
         temperature: float,
         system_prompt: Optional[str],
-    ) -> Optional[str]:
-        """Invoke MiniMax via native OpenAI-compatible API."""
+    ):
+        """Invoke MiniMax via native OpenAI-compatible API.
+
+        Returns:
+            Tuple of (response_text, usage_dict). Both are None/empty on failure.
+        """
         # Reasoning model exhausts small budgets on <think> blocks; enforce a floor
         max_tokens = max(max_tokens, self._MINIMAX_MIN_TOKENS)
         url = f"{self._primary_base_url}/v1/chat/completions"
@@ -190,7 +221,7 @@ class LLMClient:
 
             if "error" in data:
                 logger.warning(f"MiniMax API returned error: {data['error']}")
-                return None
+                return None, {}
 
             choice = data["choices"][0]
             finish_reason = choice.get("finish_reason")
@@ -198,20 +229,25 @@ class LLMClient:
 
             if text is None:
                 logger.warning(f"MiniMax returned None content (finish_reason={finish_reason})")
-                return None
+                return None, {}
 
             # Strip <think>...</think> reasoning blocks
             text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
             if not text:
                 logger.warning(f"MiniMax returned empty content after stripping think blocks (finish_reason={finish_reason})")
-                return None
+                return None, {}
 
+            usage = data.get("usage", {})
+            token_usage = {
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+            }
             logger.info(f"MiniMax response received ({len(text)} chars, finish_reason={finish_reason})")
-            return text
+            return text, token_usage
         except (requests.RequestException, KeyError, IndexError) as e:
             logger.error(f"MiniMax API error: {e}")
-            return None
+            return None, {}
 
     def _invoke_openrouter(
         self,
@@ -220,8 +256,12 @@ class LLMClient:
         max_tokens: int,
         temperature: float,
         system_prompt: Optional[str],
-    ) -> Optional[str]:
-        """Invoke OpenRouter via OpenAI-compatible API."""
+    ):
+        """Invoke OpenRouter via OpenAI-compatible API.
+
+        Returns:
+            Tuple of (response_text, usage_dict). Both are None/empty on failure.
+        """
         headers = {
             "Authorization": f"Bearer {self._fallback_api_key}",
             "Content-Type": "application/json",
@@ -248,12 +288,17 @@ class LLMClient:
             text = data["choices"][0]["message"]["content"]
             if text is None:
                 logger.warning(f"OpenRouter returned None content for {model} (likely reasoning-only response)")
-                return None
+                return None, {}
+            usage = data.get("usage", {})
+            token_usage = {
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+            }
             logger.info(f"OpenRouter response received ({len(text)} chars)")
-            return text
+            return text, token_usage
         except (requests.RequestException, KeyError, IndexError) as e:
             logger.error(f"OpenRouter API error: {e}")
-            return None
+            return None, {}
 
     @staticmethod
     def _extract_anthropic_text(data: Dict[str, Any]) -> str:

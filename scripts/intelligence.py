@@ -845,6 +845,8 @@ class BriefingIntelligence:
         papers: List[Dict[str, Any]],
         blogs: List[Dict[str, Any]],
         news: List[Dict[str, Any]],
+        newsletters: Optional[List[Dict[str, Any]]] = None,
+        github_trending: Optional[List[Dict[str, Any]]] = None,
     ) -> List[str]:
         """
         Identify emerging themes across today's content not in configured topics.
@@ -853,6 +855,8 @@ class BriefingIntelligence:
             papers: ArXiv papers.
             blogs: Blog articles.
             news: News articles.
+            newsletters: Newsletter items from Supabase.
+            github_trending: GitHub trending repos from Supabase.
 
         Returns:
             List of emerging theme descriptions (may be empty).
@@ -867,6 +871,10 @@ class BriefingIntelligence:
             titles.append(f"[blog] {b.get('title', '')}")
         for n in news[:10]:
             titles.append(f"[news] {n.get('title', '')}")
+        for nl in (newsletters or [])[:8]:
+            titles.append(f"[newsletter] {nl.get('title', '')}")
+        for gh in (github_trending or [])[:5]:
+            titles.append(f"[github] {gh.get('title', '')}")
 
         if not titles:
             return []
@@ -874,7 +882,8 @@ class BriefingIntelligence:
         titles_block = "\n".join(titles)
         topics_str = ", ".join(self.topics)
         prompt = (
-            "Given today's papers, blogs, and news, identify 2-3 emerging themes "
+            "Given today's papers, blogs, news, newsletters, and GitHub trending repos, "
+            "identify 2-3 emerging themes "
             "or trends that are NOT already covered by these configured topics:\n\n"
             f"<configured_topics>{topics_str}</configured_topics>\n\n"
             f"<content>\n{titles_block}\n</content>\n\n"
@@ -1026,7 +1035,9 @@ class BriefingIntelligence:
         all_data = "\n\n".join(sections)
 
         # Detect cross-source correlations
-        cross_source_signals = self._detect_cross_source_signals(papers, blogs, news)
+        cross_source_signals = self._detect_cross_source_signals(
+            papers, blogs, news, newsletters, github_trending,
+        )
         cross_source_note = ""
         if cross_source_signals:
             cross_source_note = (
@@ -1065,6 +1076,8 @@ class BriefingIntelligence:
         blogs: List[Dict[str, Any]],
         news: List[Dict[str, Any]],
         state: Dict[str, Any],
+        newsletters: Optional[List[Dict[str, Any]]] = None,
+        github_trending: Optional[List[Dict[str, Any]]] = None,
     ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         Track topics that appear across multiple days and mark trending items.
@@ -1078,6 +1091,8 @@ class BriefingIntelligence:
             blogs: Today's blogs.
             news: Today's news.
             state: Previous state with trending_topics.
+            newsletters: Newsletter items from Supabase.
+            github_trending: GitHub trending repos from Supabase.
 
         Returns:
             Tuple of (updated_state, annotated_papers, annotated_blogs, annotated_news).
@@ -1098,6 +1113,10 @@ class BriefingIntelligence:
             current_items.append(f"[blog] {b.get('title', '')}")
         for n in news[:10]:
             current_items.append(f"[news] {n.get('title', '')}")
+        for nl in (newsletters or [])[:8]:
+            current_items.append(f"[newsletter] {nl.get('title', '')}")
+        for gh in (github_trending or [])[:5]:
+            current_items.append(f"[github] {gh.get('title', '')}")
 
         if not current_items:
             return state, papers, blogs, news
@@ -1219,6 +1238,8 @@ class BriefingIntelligence:
         blogs: List[Dict[str, Any]],
         news: List[Dict[str, Any]],
         tracked_entities: List[Dict[str, str]],
+        newsletters: Optional[List[Dict[str, Any]]] = None,
+        github_trending: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Detect mentions of tracked entities (companies/people) in content.
@@ -1228,6 +1249,8 @@ class BriefingIntelligence:
             blogs: Today's blogs.
             news: Today's news.
             tracked_entities: List of entities to track with name and type.
+            newsletters: Newsletter items from Supabase.
+            github_trending: GitHub trending repos from Supabase.
 
         Returns:
             List of entity mention dicts with name, type, count, and example_titles.
@@ -1256,6 +1279,18 @@ class BriefingIntelligence:
                 "title": n.get("title", ""),
                 "summary": n.get("brief_summary", "") or n.get("description", "")[:200],
                 "type": "news",
+            })
+        for nl in (newsletters or []):
+            all_items.append({
+                "title": nl.get("title", ""),
+                "summary": nl.get("summary", "")[:200],
+                "type": "newsletter",
+            })
+        for gh in (github_trending or []):
+            all_items.append({
+                "title": gh.get("title", ""),
+                "summary": gh.get("summary", "")[:200],
+                "type": "github",
             })
 
         # Case-insensitive substring matching
@@ -1359,9 +1394,11 @@ class BriefingIntelligence:
         papers: List[Dict[str, Any]],
         blogs: List[Dict[str, Any]],
         news: List[Dict[str, Any]],
+        newsletters: Optional[List[Dict[str, Any]]] = None,
+        github_trending: Optional[List[Dict[str, Any]]] = None,
     ) -> List[str]:
         """
-        Detect topics that appear in 2+ sources (papers, blogs, news).
+        Detect topics that appear in 2+ sources (papers, blogs, news, newsletters, github).
 
         Uses simple keyword matching to find cross-source correlations.
 
@@ -1369,6 +1406,8 @@ class BriefingIntelligence:
             papers: ArXiv papers.
             blogs: Blog articles.
             news: News articles.
+            newsletters: Newsletter items from Supabase.
+            github_trending: GitHub trending repos from Supabase.
 
         Returns:
             List of cross-source topics (e.g., "Claude 3.5", "Trainium", etc.)
@@ -1398,6 +1437,8 @@ class BriefingIntelligence:
         paper_terms = extract_terms(papers[:15])
         blog_terms = extract_terms(blogs[:10])
         news_terms = extract_terms(news[:10])
+        newsletter_terms = extract_terms((newsletters or [])[:8])
+        github_terms = extract_terms((github_trending or [])[:5])
 
         # Find terms appearing in 2+ sources
         cross_source = []
@@ -1405,6 +1446,8 @@ class BriefingIntelligence:
             ("papers", paper_terms),
             ("blogs", blog_terms),
             ("news", news_terms),
+            ("newsletters", newsletter_terms),
+            ("github", github_terms),
         ]
 
         checked_terms = set()

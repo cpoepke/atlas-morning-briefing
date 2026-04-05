@@ -2,6 +2,7 @@
 """Tests for intelligence module."""
 
 import pytest
+from unittest.mock import MagicMock, patch
 from scripts.intelligence import BriefingIntelligence, _parse_numbered_list
 
 
@@ -90,3 +91,109 @@ class TestParseNumberedList:
         result = _parse_numbered_list(text, 2)
         assert len(result) == 2
         assert "Start of item. More of the item." == result[0]
+
+
+@pytest.fixture
+def mock_intelligence():
+    """Create a BriefingIntelligence with mocked LLM client."""
+    mock_llm = MagicMock()
+    mock_llm.enabled = True
+    mock_llm.invoke = MagicMock(return_value="THEME: Test emerging theme")
+    intel = BriefingIntelligence(mock_llm, {"arxiv_topics": ["Agentic AI"]})
+    return intel
+
+
+class TestDetectEmergingThemesWithAllSources:
+    def test_includes_newsletter_titles_in_prompt(self, mock_intelligence):
+        newsletters = [{"title": "Newsletter about agent memory"}]
+        github = [{"title": "awesome-agents"}]
+
+        mock_intelligence.detect_emerging_themes(
+            papers=[{"title": "Paper A"}],
+            blogs=[{"title": "Blog B"}],
+            news=[{"title": "News C"}],
+            newsletters=newsletters,
+            github_trending=github,
+        )
+
+        prompt = mock_intelligence.bedrock.invoke.call_args[0][0]
+        assert "[newsletter] Newsletter about agent memory" in prompt
+        assert "[github] awesome-agents" in prompt
+        assert "newsletters" in prompt.lower()
+
+    def test_works_without_optional_sources(self, mock_intelligence):
+        result = mock_intelligence.detect_emerging_themes(
+            papers=[{"title": "Paper A"}], blogs=[], news=[],
+        )
+        assert isinstance(result, list)
+
+
+class TestTrackTrendingWithAllSources:
+    def test_includes_newsletter_and_github_items(self, mock_intelligence):
+        mock_intelligence.bedrock.invoke.return_value = "[1] NEW test-topic"
+        newsletters = [{"title": "Newsletter trending topic"}]
+        github = [{"title": "trending-repo"}]
+
+        state = {"trending_topics": {}}
+        mock_intelligence.track_trending(
+            papers=[{"title": "Paper"}],
+            blogs=[{"title": "Blog"}],
+            news=[{"title": "News"}],
+            state=state,
+            newsletters=newsletters,
+            github_trending=github,
+        )
+
+        prompt = mock_intelligence.bedrock.invoke.call_args[0][0]
+        assert "[newsletter] Newsletter trending topic" in prompt
+        assert "[github] trending-repo" in prompt
+
+    def test_works_without_optional_sources(self, mock_intelligence):
+        mock_intelligence.bedrock.invoke.return_value = ""
+        state = {"trending_topics": {}}
+        result = mock_intelligence.track_trending(
+            papers=[{"title": "P"}], blogs=[], news=[], state=state,
+        )
+        assert len(result) == 4  # tuple of 4
+
+
+class TestDetectEntityMentionsWithAllSources:
+    def test_scans_newsletter_and_github_items(self, mock_intelligence):
+        tracked = [{"name": "Anthropic", "type": "company"}]
+        newsletters = [{"title": "Anthropic launches new feature", "summary": ""}]
+        github = [{"title": "anthropic-sdk", "summary": "SDK by Anthropic"}]
+
+        result = mock_intelligence.detect_entity_mentions(
+            papers=[], blogs=[], news=[], tracked_entities=tracked,
+            newsletters=newsletters, github_trending=github,
+        )
+
+        assert len(result) == 1
+        assert result[0]["name"] == "Anthropic"
+        assert result[0]["count"] >= 2  # found in newsletter title + github summary
+
+    def test_works_without_optional_sources(self, mock_intelligence):
+        tracked = [{"name": "OpenAI", "type": "company"}]
+        result = mock_intelligence.detect_entity_mentions(
+            papers=[{"title": "OpenAI paper", "summary": ""}],
+            blogs=[], news=[], tracked_entities=tracked,
+        )
+        assert len(result) == 1
+
+
+class TestCrossSourceSignalsWithAllSources:
+    def test_detects_signals_from_newsletters(self, mock_intelligence):
+        papers = [{"title": "Agent memory architectures for production"}]
+        newsletters = [{"title": "Agent memory architectures in practice"}]
+
+        result = mock_intelligence._detect_cross_source_signals(
+            papers=papers, blogs=[], news=[],
+            newsletters=newsletters, github_trending=[],
+        )
+        assert any("agent memory" in s.lower() for s in result)
+
+    def test_works_without_optional_sources(self, mock_intelligence):
+        result = mock_intelligence._detect_cross_source_signals(
+            papers=[{"title": "test paper"}], blogs=[], news=[],
+        )
+        assert isinstance(result, list)

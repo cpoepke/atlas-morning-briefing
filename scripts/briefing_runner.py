@@ -1103,14 +1103,17 @@ class BriefingRunner:
                     # --- Parallel batch 2: stocks + themes (both depend on news) ---
                     with ThreadPoolExecutor(max_workers=2) as pool:
                         fut_stocks = pool.submit(self.intelligence.correlate_stocks_and_news, stocks, news)
-                        fut_themes = pool.submit(self.intelligence.detect_emerging_themes, papers, blogs, news)
+                        fut_themes = pool.submit(
+                            self.intelligence.detect_emerging_themes,
+                            papers, blogs, news, newsletters, github_trending,
+                        )
 
                         stocks = fut_stocks.result()
                         emerging_themes = fut_themes.result()
 
                     # Track trending topics across days (Feature 1)
                     previous_state, papers, blogs, news = self.intelligence.track_trending(
-                        papers, blogs, news, previous_state
+                        papers, blogs, news, previous_state, newsletters, github_trending,
                     )
 
             # --- Market trend analysis (must happen after correlation) ---
@@ -1143,7 +1146,8 @@ class BriefingRunner:
                     if tracked_entities:
                         logger.info("=== Intelligence Layer: Entity Tracking ===")
                         entity_mentions = self.intelligence.detect_entity_mentions(
-                            papers, blogs, news, tracked_entities
+                            papers, blogs, news, tracked_entities,
+                            newsletters, github_trending,
                         )
                         # Add to synthesis for rendering in Executive Summary
                         synthesis["entity_mentions"] = entity_mentions

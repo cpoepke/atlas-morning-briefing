@@ -166,6 +166,8 @@ class ObsidianWriter:
             "papers-found": status.get("papers_found", 0),
             "blogs-found": status.get("blogs_found", 0),
             "news-found": status.get("news_found", 0),
+            "newsletters-found": status.get("newsletters_found", 0),
+            "github-trending-found": status.get("github_trending_found", 0),
             "intelligence-enabled": status.get("intelligence_enabled", False),
             "emerging-themes": emerging_themes[:5] if emerging_themes else [],
             "top-papers": [p.get("title", "") for p in top_papers[:5]],
